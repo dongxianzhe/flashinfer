@@ -1,6 +1,7 @@
 #include <iostream>
 #include <thrust/device_vector.h>
 
+#include"multistream_scheduler.cuh"
 #include "flashinfer_ops.cuh"
 
 using flashinfer::PosEncodingMode;
@@ -107,18 +108,125 @@ void perf_flashinfer_single_prefill(cudaStream_t& stream, prefill_input_data* in
 }
 
 int main() {
-  decode_input_data decode_data;
-  cudaStream_t decode_stream;
-  cudaStreamCreate(&decode_stream);
-  prefill_input_data prefill_data;
-  cudaStream_t prefill_stream;
-  cudaStreamCreate(&prefill_stream);
-
-  for (int i = 0; i < 100; ++i) {
-    perf_flashinfer_single_decode(decode_stream, &decode_data);
-    perf_flashinfer_single_prefill(prefill_stream, &prefill_data);
+  const int numGPUs = 4;
+  std::vector<decode_input_data*> decode_data;
+  std::vector<prefill_input_data*> prefill_data;
+  for(int i = 0;i < numGPUs;i ++){
+    cudaSetDevice(i);
+    decode_data.push_back(new decode_input_data());
+    prefill_data.push_back(new prefill_input_data());
   }
-  cudaStreamSynchronize(decode_stream);
-  cudaStreamSynchronize(prefill_stream);
-  return 0;
+
+
+  {
+    printf("========== one gpu one stream performance ==========\n");
+    Scheduler scheduler({0});
+    int gpu;
+    cudaStream_t stream;
+    scheduler.scheduleKernel(&gpu, &stream, false, ScheduleMode::FREE_MEMORY_SCHEDULE_MODE);
+    std::cout << "scheduled on gpu " << gpu << " stream " << stream << std::endl;
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);cudaEventCreate(&stop);
+    cudaEventRecord(start, stream);
+    for (int i = 0; i < 100; ++ i) {
+      perf_flashinfer_single_prefill(stream, prefill_data[gpu]);
+      perf_flashinfer_single_decode(stream, decode_data[gpu]);
+    }
+    cudaDeviceSynchronize();
+
+    cudaEventRecord(stop, stream);
+    cudaEventSynchronize(stop);
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    printf("elapsed time %f ms\n", milliseconds);
+  }
+
+  {
+    printf("========== one gpu multi stream performance ==========\n");
+    Scheduler scheduler({0});
+    int gpu;
+    cudaStream_t tensor_stream;
+    cudaStream_t cuda_stream;
+  
+    scheduler.scheduleGPU(&gpu, &cuda_stream, &tensor_stream, ScheduleMode::FREE_MEMORY_SCHEDULE_MODE);
+    std::cout << "scheduled on gpu " << gpu << " stream " << tensor_stream << " " << cuda_stream << std::endl;
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);cudaEventCreate(&stop);
+    cudaEventRecord(start, tensor_stream);
+    for (int i = 0; i < 100; ++ i) {
+      perf_flashinfer_single_prefill(tensor_stream, prefill_data[gpu]);
+      perf_flashinfer_single_decode(cuda_stream, decode_data[gpu]);
+    }
+    cudaDeviceSynchronize();
+
+    cudaEventRecord(stop, tensor_stream);
+    cudaEventSynchronize(stop);
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    printf("elapsed time %f ms\n", milliseconds);
+  }
+
+  {
+    printf("========== multi gpu one stream performance ==========\n");
+    Scheduler scheduler({0, 1});
+
+    int gpu;
+    cudaStream_t cudaStream, tensorStream;
+    cudaSetDevice(0);
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);cudaEventCreate(&stop);
+    cudaEventRecord(start);
+    for (int i = 0; i < 100; ++ i) {
+      scheduler.scheduleGPU(&gpu, &cudaStream, &tensorStream, ScheduleMode::ROUND_ROBIN_SCHEDULE_MODE);
+      std::cout << "scheduled on gpu " << gpu << " stream " << cudaStream << std::endl;
+
+      perf_flashinfer_single_prefill(cudaStream, prefill_data[gpu]);
+      perf_flashinfer_single_decode(cudaStream, decode_data[gpu]);
+    }
+
+    for(int i = 0;i < 4;i ++){
+      cudaSetDevice(i);
+      cudaDeviceSynchronize();
+    }
+
+    cudaSetDevice(0);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    printf("elapsed time %f ms\n", milliseconds);
+  }
+
+  {
+    printf("========== multi gpu multi stream performance ==========\n");
+    Scheduler scheduler({0, 1});
+
+    int gpu;
+    cudaStream_t cudaStream, tensorStream;
+    cudaSetDevice(0);
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);cudaEventCreate(&stop);
+    cudaEventRecord(start);
+    for (int i = 0; i < 100; ++ i) {
+      scheduler.scheduleGPU(&gpu, &cudaStream, &tensorStream, ScheduleMode::ROUND_ROBIN_SCHEDULE_MODE);
+      std::cout << "scheduled on gpu " << gpu << " stream " << cudaStream << " " << tensorStream << std::endl;
+
+      perf_flashinfer_single_prefill(tensorStream, prefill_data[gpu]);
+      perf_flashinfer_single_decode(cudaStream, decode_data[gpu]);
+    }
+
+    for(int i = 0;i < 4;i ++){
+      cudaSetDevice(i);
+      cudaDeviceSynchronize();
+    }
+
+    cudaSetDevice(0);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    printf("elapsed time %f ms\n", milliseconds);
+  }
 }
