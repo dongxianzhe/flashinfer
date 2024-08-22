@@ -129,3 +129,22 @@ void bench_flashinfer_batch_prefill_with_ragged_kv(nvbench::state& state) {
       .add_int64_axis("cooperative", {1})
 
 BENCH_FLASHINFER_BATCH_PREFILL_WITH_RAGGED_KV(half, half);
+
+// #define SIMPLE_BENCH_FLASHINFER_BATCH_PREFILL_WITH_RAGGED_KV(dtype_in, dtype_out)                     \
+//   auto bench_flashinfer_batch_prefill_with_ragged_kv_##dtype_in##_##dtype_out##_ =             \
+//       bench_flashinfer_batch_prefill_with_ragged_kv<dtype_in, dtype_out, false>;               \
+//   NVBENCH_BENCH(bench_flashinfer_batch_prefill_with_ragged_kv_##dtype_in##_##dtype_out##_)     \
+//       .set_name(                                                                               \
+//           ("bench_flashinfer_batch_prefill_with_ragged_kv_" STR(dtype_in) "_" STR(dtype_out))) \
+//       .add_int64_axis("kv_len", {4096})                     \
+//       .add_int64_axis("batch_size", {32})                                                \
+//       .add_int64_axis("num_qo_heads", {32})                                                    \
+//       .add_int64_axis("num_kv_heads", {32})                                                    \
+//       .add_int64_axis("head_dim", {128})                                                       \
+//       .add_int64_axis("causal", {0, 1})                                                        \
+//       .add_int64_axis("kv_layout", {0})                                                        \
+//       .add_int64_axis("pos_encoding_mode", {0})                                                \
+//       .add_int64_axis("allow_fp16_qk_reduction", {0})                                          \
+//       .add_int64_axis("cooperative", {1})
+  
+// SIMPLE_BENCH_FLASHINFER_BATCH_PREFILL_WITH_RAGGED_KV(half, half);
