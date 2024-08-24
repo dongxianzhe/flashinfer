@@ -67,7 +67,7 @@ void Scheduler::initStream(){
     if (cudaStatus != cudaSuccess || numGpus <= 0) {
         throw std::runtime_error("No CUDA-enabled devices detected or failed to get device count.");
     }
-    cudaStatus = cudaDeviceGetStreamPriorityRange(&lowPriority, &highPriority);
+    cudaStatus = cudaDeviceGetStreamPriorityRange(&lowPriority, &lowPriority);
     if (cudaStatus != cudaSuccess) {
         throw std::runtime_error("Failed to get stream priority range.");
     }

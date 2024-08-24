@@ -1,14 +1,16 @@
 #include <iostream>
 #include <thrust/device_vector.h>
 
+#include <cupti.h>
+
 #include"multistream_scheduler.cuh"
 #include "flashinfer_ops.cuh"
 
 using flashinfer::PosEncodingMode;
 using flashinfer::QKVLayout;
 
-struct decode_input_data {
-  size_t seq_len = 1024;
+struct single_decode_input_data {
+  size_t seq_len = 8192;
   size_t num_qo_heads = 32;
   size_t num_kv_heads = 32;
   size_t head_dim = 128;
@@ -22,7 +24,7 @@ struct decode_input_data {
   thrust::device_vector<half>* O = nullptr;
   thrust::device_vector<half>* tmp = nullptr;
   // Allocate input data:
-  decode_input_data() {
+  single_decode_input_data() {
     Q = new thrust::device_vector<half>(num_qo_heads * head_dim);
     K = new thrust::device_vector<half>(seq_len * num_kv_heads * head_dim);
     V = new thrust::device_vector<half>(seq_len * num_kv_heads * head_dim);
@@ -30,7 +32,7 @@ struct decode_input_data {
     tmp = new thrust::device_vector<half>(16 * 1024 * 1024);
   }
 
-  ~decode_input_data() {
+  ~single_decode_input_data() {
     delete tmp;
     delete O;
     delete V;
@@ -39,8 +41,8 @@ struct decode_input_data {
   }
 };
 
-struct prefill_input_data {
-  size_t kv_len = 2048;
+struct single_prefill_input_data {
+  size_t kv_len = 8192;
   size_t qo_len = kv_len;
   size_t num_kv_heads = 32;
   size_t num_qo_heads = 32;
@@ -59,7 +61,7 @@ struct prefill_input_data {
   thrust::device_vector<half>* O = nullptr;
   thrust::device_vector<half>* tmp = nullptr;
 
-  prefill_input_data() {
+  single_prefill_input_data() {
     Q = new thrust::device_vector<half>(qo_len * num_qo_heads * head_dim);
     K = new thrust::device_vector<half>(kv_len * num_kv_heads * head_dim);
     V = new thrust::device_vector<half>(kv_len * num_kv_heads * head_dim);
@@ -68,7 +70,7 @@ struct prefill_input_data {
     tmp = new thrust::device_vector<half>(16 * 1024 * 1024);
   }
 
-  ~prefill_input_data() {
+  ~single_prefill_input_data() {
     delete tmp;
     delete O;
     delete mask;
@@ -78,7 +80,7 @@ struct prefill_input_data {
   }
 };
 
-void perf_flashinfer_single_decode(cudaStream_t& stream, decode_input_data* input) {
+void perf_flashinfer_single_decode(cudaStream_t& stream, single_decode_input_data* input) {
   // Provide throughput information:
   cudaError_t status = flashinfer::SingleDecodeWithKVCache(
       thrust::raw_pointer_cast(input->Q->data()), thrust::raw_pointer_cast(input->K->data()),
@@ -93,7 +95,7 @@ void perf_flashinfer_single_decode(cudaStream_t& stream, decode_input_data* inpu
   }
 }
 
-void perf_flashinfer_single_prefill(cudaStream_t& stream, prefill_input_data* input) {
+void perf_flashinfer_single_prefill(cudaStream_t& stream, single_prefill_input_data* input) {
   auto status = flashinfer::SinglePrefillWithKVCache<half, half>(
       thrust::raw_pointer_cast(input->Q->data()), thrust::raw_pointer_cast(input->K->data()),
       thrust::raw_pointer_cast(input->V->data()), thrust::raw_pointer_cast(input->O->data()),
@@ -109,29 +111,32 @@ void perf_flashinfer_single_prefill(cudaStream_t& stream, prefill_input_data* in
 
 int main() {
   const int numGPUs = 4;
-  std::vector<decode_input_data*> decode_data;
-  std::vector<prefill_input_data*> prefill_data;
+  std::vector<single_decode_input_data*> decode_data;
+  std::vector<single_prefill_input_data*> prefill_data;
   for(int i = 0;i < numGPUs;i ++){
     cudaSetDevice(i);
-    decode_data.push_back(new decode_input_data());
-    prefill_data.push_back(new prefill_input_data());
+    decode_data.push_back(new single_decode_input_data());
+    prefill_data.push_back(new single_prefill_input_data());
   }
 
+  const int iter = 100;
 
   {
     printf("========== one gpu one stream performance ==========\n");
-    Scheduler scheduler({0});
+    Scheduler scheduler({1});
     int gpu;
     cudaStream_t stream;
     scheduler.scheduleKernel(&gpu, &stream, false, ScheduleMode::FREE_MEMORY_SCHEDULE_MODE);
-    std::cout << "scheduled on gpu " << gpu << " stream " << stream << std::endl;
+    // std::cout << "scheduled on gpu " << gpu << " stream " << stream << std::endl;
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);cudaEventCreate(&stop);
     cudaEventRecord(start, stream);
-    for (int i = 0; i < 100; ++ i) {
+    for (int i = 0; i < iter; ++ i) {
       perf_flashinfer_single_prefill(stream, prefill_data[gpu]);
-      perf_flashinfer_single_decode(stream, decode_data[gpu]);
+      for(int j = 0;j < 30;j ++){
+        perf_flashinfer_single_decode(stream, decode_data[gpu]);
+      }
     }
     cudaDeviceSynchronize();
 
@@ -140,24 +145,29 @@ int main() {
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
     printf("elapsed time %f ms\n", milliseconds);
+
   }
 
   {
     printf("========== one gpu multi stream performance ==========\n");
-    Scheduler scheduler({0});
+    Scheduler scheduler({1});
     int gpu;
     cudaStream_t tensor_stream;
     cudaStream_t cuda_stream;
   
     scheduler.scheduleGPU(&gpu, &cuda_stream, &tensor_stream, ScheduleMode::FREE_MEMORY_SCHEDULE_MODE);
-    std::cout << "scheduled on gpu " << gpu << " stream " << tensor_stream << " " << cuda_stream << std::endl;
+    // std::cout << "scheduled on gpu " << gpu << " stream " << tensor_stream << " " << cuda_stream << std::endl;
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);cudaEventCreate(&stop);
     cudaEventRecord(start, tensor_stream);
-    for (int i = 0; i < 100; ++ i) {
+
+
+    for (int i = 0; i < iter; ++ i) {
       perf_flashinfer_single_prefill(tensor_stream, prefill_data[gpu]);
-      perf_flashinfer_single_decode(cuda_stream, decode_data[gpu]);
+      for(int j = 0;j < 30;j ++){
+        perf_flashinfer_single_decode(cuda_stream, decode_data[gpu]);
+      }
     }
     cudaDeviceSynchronize();
 
@@ -166,11 +176,13 @@ int main() {
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
     printf("elapsed time %f ms\n", milliseconds);
+
+
   }
 
   {
     printf("========== multi gpu one stream performance ==========\n");
-    Scheduler scheduler({0, 1});
+    Scheduler scheduler({2, 3});
 
     int gpu;
     cudaStream_t cudaStream, tensorStream;
@@ -178,9 +190,9 @@ int main() {
     cudaEvent_t start, stop;
     cudaEventCreate(&start);cudaEventCreate(&stop);
     cudaEventRecord(start);
-    for (int i = 0; i < 100; ++ i) {
+    for (int i = 0; i < iter; ++ i) {
       scheduler.scheduleGPU(&gpu, &cudaStream, &tensorStream, ScheduleMode::ROUND_ROBIN_SCHEDULE_MODE);
-      std::cout << "scheduled on gpu " << gpu << " stream " << cudaStream << std::endl;
+      // std::cout << "scheduled on gpu " << gpu << " stream " << cudaStream << std::endl;
 
       perf_flashinfer_single_prefill(cudaStream, prefill_data[gpu]);
       perf_flashinfer_single_decode(cudaStream, decode_data[gpu]);
@@ -201,7 +213,7 @@ int main() {
 
   {
     printf("========== multi gpu multi stream performance ==========\n");
-    Scheduler scheduler({0, 1});
+    Scheduler scheduler({2, 3});
 
     int gpu;
     cudaStream_t cudaStream, tensorStream;
@@ -209,9 +221,9 @@ int main() {
     cudaEvent_t start, stop;
     cudaEventCreate(&start);cudaEventCreate(&stop);
     cudaEventRecord(start);
-    for (int i = 0; i < 100; ++ i) {
+    for (int i = 0; i < iter; ++ i) {
       scheduler.scheduleGPU(&gpu, &cudaStream, &tensorStream, ScheduleMode::ROUND_ROBIN_SCHEDULE_MODE);
-      std::cout << "scheduled on gpu " << gpu << " stream " << cudaStream << " " << tensorStream << std::endl;
+      // std::cout << "scheduled on gpu " << gpu << " stream " << cudaStream << " " << tensorStream << std::endl;
 
       perf_flashinfer_single_prefill(tensorStream, prefill_data[gpu]);
       perf_flashinfer_single_decode(cudaStream, decode_data[gpu]);

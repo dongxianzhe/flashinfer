@@ -15,16 +15,14 @@ constexpr QKVLayout kv_layout = flashinfer::QKVLayout::kNHD;
 struct batch_decode_input_data {
   size_t head_dim = 128;
 
-  size_t seqlen = 512;
-  size_t batch_size = 32;
+  size_t seqlen = 1024;
+  size_t batch_size = 4;
   size_t page_size = 64;
   size_t num_qo_heads = 32;
   size_t num_kv_heads = 32;
-  bool cooperative = 1;
+  bool cooperative = false;
   size_t pages_per_seq = (seqlen + page_size - 1) / page_size;
   size_t num_pages = pages_per_seq * batch_size;
-
-
 
   std::vector<int32_t>* kv_indptr_host = nullptr;
   std::vector<int32_t>* kv_indicies_host = nullptr;
@@ -74,8 +72,6 @@ struct batch_decode_input_data {
 
      float_buffer = new thrust::device_vector<char>(float_workspace_size_in_bytes);
      int_buffer   = new thrust::device_vector<char>(int_workspace_size_in_bytes);
-
-
   }
 
   ~batch_decode_input_data() {
@@ -94,16 +90,16 @@ struct batch_decode_input_data {
 };
 
 struct batch_prefill_input_data {
-  size_t kv_len = 512;
-  size_t qo_len = 512;
-  size_t batch_size = 32;
+  size_t kv_len = 2048;
+  size_t qo_len = kv_len;
+  size_t batch_size = 4;
   size_t num_qo_heads = 32;
   size_t num_kv_heads = 32;
   size_t head_dim = 128;
   size_t pos_encoding_mode = 0;
   size_t kv_layout = 0;
   bool causal = true;
-  bool cooperative = true;
+  bool cooperative = false;
   bool allow_fp16_qk_reduction = false;
   size_t float_workspace_size_in_bytes = 128 * 1024 * 1024;
   size_t int_workspace_size_in_bytes = 8 * 1024 * 1024;
@@ -200,38 +196,31 @@ void perf_flashinfer_batch_prefill_with_ragged_kv(cudaStream_t& stream, batch_pr
 }
 
 int main() {
-  const int numGPUs = 4;
-  std::vector<batch_decode_input_data *> decode_data;
-  std::vector<batch_prefill_input_data*> prefill_data;
-  for(int i = 0;i < numGPUs;i ++){
-    cudaSetDevice(i);
-    decode_data.push_back (new batch_decode_input_data ());
-    prefill_data.push_back(new batch_prefill_input_data());
-  }
+  Scheduler scheduler({1});
+  int gpu;
+  cudaStream_t tensor_stream;
+  cudaStream_t cuda_stream;
+
+  scheduler.scheduleGPU(&gpu, &cuda_stream, &tensor_stream, ScheduleMode::FREE_MEMORY_SCHEDULE_MODE);
 
   const int iter = 100;
+  cudaSetDevice(gpu);
+  batch_prefill_input_data prefill_data;
+  batch_decode_input_data decode_data;
 
   {
     printf("========== one gpu one stream performance ==========\n");
-    Scheduler scheduler({1});
-    int gpu;
-    cudaStream_t stream;
-    scheduler.scheduleKernel(&gpu, &stream, false, ScheduleMode::FREE_MEMORY_SCHEDULE_MODE);
-    // std::cout << "scheduled on gpu " << gpu << " stream " << stream << std::endl;
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);cudaEventCreate(&stop);
-    cudaEventRecord(start, stream);
+    cudaEventRecord(start, tensor_stream);
     for (int i = 0; i < iter; ++ i) {
-      perf_flashinfer_batch_prefill_with_ragged_kv(stream, prefill_data[gpu]);
-
-      for(int j = 0;j < 30;j ++){
-        perf_flashinfer_batch_decode(stream, decode_data[gpu]);
-      }
+      perf_flashinfer_batch_prefill_with_ragged_kv(tensor_stream, &prefill_data);
+      perf_flashinfer_batch_decode(tensor_stream, &decode_data);
     }
     cudaDeviceSynchronize();
 
-    cudaEventRecord(stop, stream);
+    cudaEventRecord(stop, tensor_stream);
     cudaEventSynchronize(stop);
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
@@ -241,24 +230,14 @@ int main() {
 
   {
     printf("========== one gpu multi stream performance ==========\n");
-    Scheduler scheduler({1});
-    int gpu;
-    cudaStream_t tensor_stream;
-    cudaStream_t cuda_stream;
-  
-    scheduler.scheduleGPU(&gpu, &cuda_stream, &tensor_stream, ScheduleMode::FREE_MEMORY_SCHEDULE_MODE);
-    // std::cout << "scheduled on gpu " << gpu << " stream " << tensor_stream << " " << cuda_stream << std::endl;
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);cudaEventCreate(&stop);
     cudaEventRecord(start, tensor_stream);
 
-
     for (int i = 0; i < iter; ++ i) {
-      perf_flashinfer_batch_prefill_with_ragged_kv(tensor_stream, prefill_data[gpu]);
-      for(int j = 0;j < 30;j ++){
-        perf_flashinfer_batch_decode(cuda_stream, decode_data[gpu]);
-      }
+      perf_flashinfer_batch_prefill_with_ragged_kv(tensor_stream, &prefill_data);
+      perf_flashinfer_batch_decode(cuda_stream, &decode_data);
     }
     cudaDeviceSynchronize();
 
